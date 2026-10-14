@@ -17,12 +17,44 @@ npm install @wyre-ai/crewhu-mcp
 
 ## Configuration
 
-Set the following environment variables:
+Copy [`.env.example`](.env.example) and set the variables below. Leave `CONDUIT_S2S_SECRET` empty in that file.
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `CREWHU_API_TOKEN` | Yes | Your Crewhu API token |
-| `MCP_TRANSPORT` | No | Transport mode: stdio (default) or http |
+| `CREWHU_API_TOKEN` | For stdio and `AUTH_MODE=env` | Crewhu API token. Not read in gateway mode. |
+| `MCP_TRANSPORT` | No | `stdio` (default) or `http` |
+| `AUTH_MODE` | No | `gateway` (Docker image and Compose default) or `env`. Gateway mode requires `X-Crewhu-Api-Token` on each `/mcp` request and never falls back to `CREWHU_API_TOKEN`. `env` uses that variable only after S2S auth succeeds. |
+| `CONDUIT_S2S_SECRET` | Yes for HTTP | Service-to-service HMAC secret. The HTTP server logs an error and exits non-zero when this is empty or a known placeholder (`changeme`, `replace-with-a-real-secret`, and similar). Compose will not start without it. Generate with `openssl rand -hex 32`. Never commit a real value. The value is never logged. |
+| `MCP_ALLOW_INSECURE_DEV` | No | Set to exactly `1` only for local development to start HTTP without `CONDUIT_S2S_SECRET`. The process logs a warning and does not enforce `X-Gateway-S2S`. The listener is forced to `127.0.0.1` even if `MCP_HTTP_HOST` is a wider address. A placeholder secret is still refused. |
+| `MCP_HTTP_HOST` | No | Bind address when `MCP_TRANSPORT=http`. Defaults to `127.0.0.1`. Honored when `CONDUIT_S2S_SECRET` is set. The container image sets `0.0.0.0`. |
+| `MCP_HTTP_PORT` | No | HTTP port. Defaults to `8080`. |
+
+`/health` stays unauthenticated and does not require `X-Gateway-S2S`. The stdio transport does not use `CONDUIT_S2S_SECRET`.
+
+### HTTP authentication
+
+With `MCP_TRANSPORT=http` and a real `CONDUIT_S2S_SECRET`, every `/mcp` request must include `X-Gateway-S2S`. A missing or invalid header returns 401 before any vendor credential is read.
+
+The header is an HMAC proof:
+
+```text
+X-Gateway-S2S: t=<unix seconds>,v1=<hex hmac-sha256>
+```
+
+`v1` is the hex-encoded HMAC-SHA256 of the ASCII string `t=<unix seconds>` (the same `t=` prefix and value), keyed with `CONDUIT_S2S_SECRET`. The timestamp must be within 300 seconds of the server clock.
+
+```bash
+t=$(date +%s)
+sig=$(printf 't=%s' "$t" | openssl dgst -sha256 -hmac "$CONDUIT_S2S_SECRET" -hex | awk '{print $NF}')
+curl -sS "http://127.0.0.1:8080/mcp" \
+  -H "X-Gateway-S2S: t=${t},v1=${sig}" \
+  -H "X-Crewhu-Api-Token: $CREWHU_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+In `AUTH_MODE=gateway`, `/mcp` also requires `X-Crewhu-Api-Token`. A missing or blank header returns 401 and does not fall back to `CREWHU_API_TOKEN`.
 
 ## Usage
 
@@ -54,11 +86,37 @@ claude mcp add crewhu-mcp \
 
 ### Docker
 
+The image listens on `0.0.0.0` inside the container (`MCP_HTTP_HOST`) and defaults to `AUTH_MODE=gateway`. Publish the port on loopback and pass a real S2S secret. In gateway mode, the Crewhu token arrives on each request as `X-Crewhu-Api-Token`; it is not read from the environment. Startup exits if `CONDUIT_S2S_SECRET` is empty or a known placeholder.
+
 ```bash
 docker build -t crewhu-mcp .
 docker run \
+  -e CONDUIT_S2S_SECRET="$CONDUIT_S2S_SECRET" \
+  -p 127.0.0.1:8080:8080 \
+  crewhu-mcp
+```
+
+Compose refuses to start when `CONDUIT_S2S_SECRET` is unset, defaults `AUTH_MODE` to `gateway`, publishes `127.0.0.1:8080:8080`, and does not set `CREWHU_API_TOKEN`:
+
+```bash
+CONDUIT_S2S_SECRET="$CONDUIT_S2S_SECRET" docker compose up
+```
+
+Single-tenant HTTP (`AUTH_MODE=env`) still requires the S2S secret, then uses `CREWHU_API_TOKEN`:
+
+```bash
+docker run \
+  -e CONDUIT_S2S_SECRET="$CONDUIT_S2S_SECRET" \
+  -e AUTH_MODE=env \
   -e CREWHU_API_TOKEN=your-value \
-  -p 8080:8080 crewhu-mcp
+  -p 127.0.0.1:8080:8080 \
+  crewhu-mcp
+```
+
+Local HTTP without a secret is development-only. It binds `127.0.0.1` only and logs a warning. A non-loopback `MCP_HTTP_HOST` is ignored:
+
+```bash
+MCP_TRANSPORT=http MCP_ALLOW_INSECURE_DEV=1 npm start
 ```
 
 ## Available Domains

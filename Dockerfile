@@ -45,6 +45,9 @@ ENV NODE_ENV=production
 ENV LOG_LEVEL=info
 ENV MCP_TRANSPORT=http
 ENV MCP_HTTP_PORT=8080
+# 0.0.0.0 is safe here only because startup refuses to listen without a real
+# CONDUIT_S2S_SECRET. Empty values and known placeholders exit non-zero.
+# AUTH_MODE=gateway never falls back to a static CREWHU_API_TOKEN.
 ENV MCP_HTTP_HOST=0.0.0.0
 # Set to 'gateway' for hosted deployment where the MCP gateway injects credentials
 ENV AUTH_MODE=gateway
